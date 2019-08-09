@@ -1,6 +1,6 @@
 import express from "express";
 
-import { runQuery } from "../helpers";
+import { runQuery, runMutation, runDelation } from "../helpers";
 
 const router = express.Router();
 
@@ -19,7 +19,7 @@ function fetchPost(uid) {
   const query = `
 {
   post(func: uid(${uid})) {
-    _uid_
+    uid
     Title {
       Text
     }
@@ -27,10 +27,10 @@ function fetchPost(uid) {
       Text
     }
     Owner {
-      _uid_
+      uid
     }
     ~Has.Answer {
-      _uid_
+      uid
     }
     ViewCount
     Type
@@ -57,10 +57,10 @@ function fetchComment(uid) {
   const query = `{
     comment(func: uid(${uid})) {
       Author {
-        _uid_
+        uid
       }
       ~Comment {
-        _uid_
+        uid
       }
     }
   }`;
@@ -84,7 +84,7 @@ function fetchComment(uid) {
 function createPost({ title, body, postType, ownerID, parentPostID }) {
   const now = new Date().toISOString();
   const escapedBody = body.replace(/\n/g, "\\n");
-
+  const uidmap = 'post';
   // THOUGHTS: composing RDFs dynamically using string interpolation is kinda
   // painful. But this is a common scenario when making apps.
   // somewhat related: maybe upsert will ease the pain
@@ -105,9 +105,7 @@ function createPost({ title, body, postType, ownerID, parentPostID }) {
 `;
   }
 
-  const query = `
-mutation {
-  set {
+  const Nquads = `
     <_:post> <Type> "${postType}" .
     <_:post> <ViewCount> "0" .
     <_:post> <Owner> <${ownerID}> .
@@ -124,14 +122,12 @@ mutation {
     <_:post> <Body> <_:newBody> .
 
     ${hasAnswerRDF}
-  }
-}
 `;
 
   return new Promise((resolve, reject) => {
-    runQuery(query)
+    runMutation(Nquads, "blank", uidmap)
       .then(({ data }) => {
-        resolve(data.uids.post);
+        resolve(data);
       })
       .catch(({ errors }) => {
         console.log(errors);
@@ -150,14 +146,14 @@ function updatePost({ post, title, body, currentUserUID }) {
   if (post.Type === "Question" && post.Title[0].Text !== title) {
     titleSetMutation = `
   <_:newTitle> <Timestamp> "${now}" .
-  <_:newTitle> <Post> <${post._uid_}> .
+  <_:newTitle> <Post> <${post.uid}> .
   <_:newTitle> <Author> <${currentUserUID}> .
   <_:newTitle> <Text> "${title}" .
   <_:newTitle> <Type> "Title" .
-  <${post._uid_}> <Title> <_:newTitle> .
+  <${post.uid}> <Title> <_:newTitle> .
 `;
     titleDeleteMutation = `
-  <${post._uid_}> <Title> * .
+  <${post.uid}> <Title> * .
 `;
   }
 
@@ -166,14 +162,14 @@ function updatePost({ post, title, body, currentUserUID }) {
   if (post.Body[0].Text !== body) {
     bodySetMutation = `
   <_:newBody> <Timestamp> "${now}" .
-  <_:newBody> <Post> <${post._uid_}> .
+  <_:newBody> <Post> <${post.uid}> .
   <_:newBody> <Author> <${currentUserUID}> .
   <_:newBody> <Text> "${escapedBody}" .
   <_:newBody> <Type> "Body" .
-  <${post._uid_}> <Body> <_:newBody> .
+  <${post.uid}> <Body> <_:newBody> .
 `;
     bodyDeleteMutation = `
-  <${post._uid_}> <Body> * .
+  <${post.uid}> <Body> * .
 `;
   }
 
@@ -184,38 +180,30 @@ function updatePost({ post, title, body, currentUserUID }) {
     }
 
     const deleteMutation = `
-mutation {
-  delete {
     ${titleDeleteMutation}
     ${bodyDeleteMutation}
-  }
-}
 `;
     const setMutation = `
-  mutation {
-    set {
+
       ${titleSetMutation}
       ${bodySetMutation}
-    }
-  }
+
   `;
-    runQuery(deleteMutation)
+  runDelation(deleteMutation)
       .then(() => {
-        return runQuery(setMutation).then(resolve);
+        return runMutation(setMutation).then(resolve);
       })
       .catch(reject);
   });
 }
 
 async function handleUpdatePost(req, res, next) {
-  console.log("req", req);
-  console.log("req.params", req.params);
   const { title, body } = req.body;
   const postUID = req.params.uid;
-  const currentUserUID = req.user && req.user._uid_;
+  const currentUserUID = req.user && req.user.uid;
 
   const post = await fetchPost(postUID);
-  if (post.Owner[0]._uid_ !== currentUserUID) {
+  if (post.Owner[0].uid !== currentUserUID) {
     res.status(403).send("Only the owner can update the post");
     return;
   }
@@ -227,7 +215,7 @@ async function handleUpdatePost(req, res, next) {
 
   if (post["~Has.Answer"]) {
     payload = Object.assign({}, payload, {
-      parentUID: post["~Has.Answer"][0]._uid_
+      parentUID: post["~Has.Answer"][0].uid
     });
   }
 
@@ -236,32 +224,30 @@ async function handleUpdatePost(req, res, next) {
 
 async function handleCreateQuestion(req, res, next) {
   const { title, body, postType } = req.body;
-  const currentUserUID = req.user._uid_;
-
+  const currentUserUID = req.user.uid;
   const postUID = await createPost({
     title,
     body,
     postType,
     ownerID: currentUserUID
   });
-
   res.json({ postUID });
 }
 
 async function handleDeletePost(req, res, next) {
   const postUID = req.params.uid;
-  const currentUserUID = req.user && req.user._uid_;
+  const currentUserUID = req.user && req.user.uid;
 
   const post = await fetchPost(postUID);
-  if (post.Owner[0]._uid_ !== currentUserUID) {
-    console.log("post owner", post.Owner[0]._uid_);
+  if (post.Owner[0].uid !== currentUserUID) {
+    console.log("post owner", post.Owner[0].uid);
     console.log("currentUser", currentUserUID);
     res.status(403).send("Only the owner can delete the post");
     return;
   }
 
   // following is necessary due to https://github.com/dgraph-io/dgraph/issues/1008
-  const parentPostUID = post["~Has.Answer"] && post["~Has.Answer"][0]._uid_;
+  const parentPostUID = post["~Has.Answer"] && post["~Has.Answer"][0].uid;
   let hasAnswerRDF = "";
   if (parentPostUID) {
     hasAnswerRDF = `<${parentPostUID}> <Has.Answer> <${postUID}> .`;
@@ -271,29 +257,29 @@ async function handleDeletePost(req, res, next) {
 {
   question(func: uid(${postUID})) {
     Has.Answer {
-      _uid_
+      uid
     }
   }
 }
 `);
-
+      // if (data.question.length > 1) {
+      //   newdata = data;
+      // }
     let answerUIDs = [];
-    if (data.question && data.question[0]["Has.Answer"]) {
-      answerUIDs = data.question[0]["Has.Answer"].map(ans => ans._uid_);
+
+    if (data.question && data.question.length > 0 && data.question[0]["Has.Answer"]) {
+      answerUIDs = data.question[0]["Has.Answer"].map(ans => ans.uid);
     }
 
     hasAnswerRDF = answerUIDs.map(uid => `<${uid}> * * .`).join("\n");
   }
 
   const query = `
-  mutation {
-    delete {
       <${postUID}> * * .
       ${hasAnswerRDF}
-    }
-  }
 `;
-  runQuery(query)
+
+runDelation(query)
     .then(() => {
       res.end();
     })
@@ -305,7 +291,7 @@ async function handleDeletePost(req, res, next) {
 async function handleCreateAnswer(req, res, next) {
   const parentPostID = req.params.uid;
   const { body, postType } = req.body;
-  const currentUserUID = req.user && req.user._uid_;
+  const currentUserUID = req.user && req.user.uid;
 
   const postUID = await createPost({
     body,
@@ -319,52 +305,46 @@ async function handleCreateAnswer(req, res, next) {
 
 function handleCreateComment(req, res, next) {
   const parentPostUID = req.params.uid;
-  const currentUserUID = req.user && req.user._uid_;
+  const currentUserUID = req.user && req.user.uid;
   const { body } = req.body;
-  const now = new Date().toISOString();
 
+  const now = new Date().toISOString();
+  const uidmap = 'comment';
   const query = `
-mutation {
-  set {
     <_:comment> <Author> <${currentUserUID}> .
     <${parentPostUID}> <Comment> <_:comment> .
     <_:comment> <Score> \"0\" .
     <_:comment> <Text> \"${body}\" .
     <_:comment> <Timestamp> \"${now}\" .
     <_:comment> <Type> \"Comment\" .
-  }
-}
 `;
 
-  runQuery(query)
+runMutation(query,"blank", uidmap)
     .then(({ data }) => {
-      res.json({ commentUID: data.uids.comment });
+      res.json({ commentUID: data });
     })
     .catch(error => {
-      console.log(err);
+      console.log(error);
     });
 }
 
 async function handleDeleteComment(req, res, next) {
   const commentUID = req.params.commentUID;
-  const currentUserUID = req.user && req.user._uid_;
+  const currentUserUID = req.user && req.user.uid;
 
   const comment = await fetchComment(commentUID);
-  if (comment.Author[0]._uid_ !== currentUserUID) {
+  if (comment.Author[0].uid !== currentUserUID) {
     res.status(403).send("Only the owner can delete the post");
     return;
   }
-  const parentPostUID = comment["~Comment"][0]._uid_;
+  const parentPostUID = comment["~Comment"][0].uid;
 
   const query = `
-  mutation {
-    delete {
       <${commentUID}> * * .
       <${parentPostUID}> <Comment> <${commentUID}> .
-    }
-  }
+
 `;
-  runQuery(query)
+runDelation(query)
     .then(() => {
       res.end();
     })
@@ -375,18 +355,15 @@ async function handleDeleteComment(req, res, next) {
 
 async function handleCreateVote(req, res, next) {
   const { type } = req.body;
+  console.log("start =>", req.body, "handleCreateVote")
   const postUID = req.params.uid;
-  const currentUserUID = req.user && req.user._uid_;
+  const currentUserUID = req.user && req.user.uid;
   const now = new Date().toISOString();
-
-  const query = `
-  mutation {
-    set {
-      <${postUID}> <${type}> <_:v> .
-      <_:v> <Author> <${currentUserUID}> .
-      <_:v> <Timestamp> \"${now}\" .
-    }
-  }
+  const uidmap = 'vote';
+  const Nquads = `
+      <${postUID}> <${type}> <_:${uidmap}> .
+      <_:${uidmap}> <Author> <${currentUserUID}> .
+      <_:${uidmap}> <Timestamp> \"${now}\" .
 `;
 
   let oppositeVoteType;
@@ -396,13 +373,24 @@ async function handleCreateVote(req, res, next) {
     oppositeVoteType = "Upvote";
   }
 
+ //! TODO: Need to check what is the problem here, avaliate about increasing and decreasing votes.
+
+ const checkVote = await fetchVote({
+  postUID,
+  voteType: type,
+  authorUID: currentUserUID
+});
+console.log(checkVote, "checkVote")
+ if (checkVote){
+  console.log(checkVote, "checkVote == true")
   await cancelVote({
     postUID,
     type: oppositeVoteType,
     authorUID: currentUserUID
   });
+}
 
-  runQuery(query)
+  runMutation(Nquads, "blank", uidmap)
     .then(() => {
       res.end();
     })
@@ -421,8 +409,8 @@ function fetchVote({ postUID, authorUID, voteType }) {
 
     currentUser(func: uid(${authorUID})) @cascade {
       ~Author {
-         _uid_
-         ~${voteType} @filter(uid(postId))
+         uid
+         ~${voteType} @filter(uid(postId)){ uid }
       }
     }
   }
@@ -431,11 +419,17 @@ function fetchVote({ postUID, authorUID, voteType }) {
   return new Promise((resolve, reject) => {
     runQuery(query)
       .then(({ data }) => {
-        if (!data || !data.currentUser || !data.currentUser[0]["~Author"]) {
-          resolve({});
+        console.log(query, "query in fetchVote", "data =>", data)
+        if (!data || !data.currentUser || !data.currentUser[0]) {
+          resolve(false);
           return;
         }
-
+        //  if (!data || !data.currentUser || !data.currentUser.length === 0 || !data.currentUser[0]["~Author"]
+        //  ) {
+        // //if (!data || !data.currentUser || !data.currentUser[0]["~Author"]) {
+        //   resolve({});
+        //   return;
+        // }
         const vote = data.currentUser[0]["~Author"][0];
         resolve(vote);
       })
@@ -453,22 +447,18 @@ async function cancelVote({ postUID, type, authorUID }) {
   });
 
   const query = `
-  mutation {
-    delete {
-      <${postUID}> <${type}> <${vote._uid_}> .
-      <${vote._uid_}> * * .
-    }
-  }
+      <${postUID}> <${type}> <${vote.uid}> .
+      <${vote.uid}> * * .
 `;
 
-  return runQuery(query);
+  return runDelation(query);
 }
 
 // handleCancelVote cancels the current user's vote for the post
 async function handleCancelVote(req, res, next) {
   const { type } = req.body;
   const postUID = req.params.uid;
-  const currentUserUID = req.user && req.user._uid_;
+  const currentUserUID = req.user && req.user.uid;
   const now = new Date().toISOString();
 
   cancelVote({ postUID, type, authorUID: currentUserUID })
@@ -489,14 +479,10 @@ async function handleIncrementViewCount(req, res, next) {
   const nextViewCount = viewCount + 1;
 
   const query = `
-  mutation {
-    set {
       <${postUID}> <ViewCount> \"${nextViewCount}\" .
-    }
-  }
 `;
 
-  runQuery(query)
+runMutation(query, "uid", postUID)
     .then(() => {
       res.end();
     })

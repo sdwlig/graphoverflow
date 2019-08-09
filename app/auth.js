@@ -1,12 +1,10 @@
 import { Strategy as GitHubStrategy } from "passport-github";
-import { runQuery, getEndpointBaseURL } from "./helpers";
+import { runQuery, runMutation } from "./helpers";
 
 // createUser persists a new user node
 function createUser(accessToken, displayName, GitHubID) {
   console.log("creating user...", accessToken);
-  const query = `
-mutation {
-  set {
+  const Nquads = `
     <_:user> <DisplayName> "${displayName}" .
     <_:user> <GitHubAccessToken> "${accessToken}" .
     <_:user> <GitHubID> "${GitHubID}" .
@@ -15,11 +13,9 @@ mutation {
     <_:user> <LastAccessDate> "0" .
     <_:user> <Location> "Earth" .
     <_:user> <Type> "User" .
-  }
-}
 `;
 
-  return runQuery(query)
+  return runMutation(Nquads,"blank", "user")
     .then(({ data }) => {
       const userUID = data.uids.user;
 
@@ -32,11 +28,10 @@ mutation {
 
 // findUserByUID queries a user node with a given uid
 export function findUserByUID(uid) {
-  console.log("finding user", uid);
   const query = `
 {
   user(func: uid(${uid})) {
-    _uid_
+    uid
     Reputation
     DisplayName
     CreationDate
@@ -56,14 +51,14 @@ export function findUserByUID(uid) {
 // configPassport configures passport using GitHub strategy
 export function configPassport(passport) {
   passport.serializeUser(function(user, done) {
-    done(null, user._uid_);
+    done(null, user.uid);
   });
 
   passport.deserializeUser(function(id, done) {
     const query = `
   {
     user(func: uid(${id})) {
-      _uid_
+      uid
       Reputation
       CreationDate
       LastAccessDate
@@ -101,11 +96,11 @@ export function configPassport(passport) {
         callbackURL: `${callbackURL}/api/auth/github/callback`
       },
       (accessToken, refreshToken, profile, cb) => {
-        console.log(profile);
+       // console.log(profile);
         const query = `
   {
     user(func: eq(GitHubID, ${profile.id})) {
-      _uid_
+      uid
       Reputation
       DisplayName
       CreationDate
@@ -118,9 +113,9 @@ export function configPassport(passport) {
   `;
         runQuery(query)
           .then(({ data }) => {
-            console.log("data.user", data.user);
             // FIXME
-            if (!data.user) {
+            if (!data.user.length) {
+              console.log("No user with this ID");
               createUser(
                 accessToken,
                 profile.username,
@@ -130,7 +125,6 @@ export function configPassport(passport) {
               });
               return;
             }
-
             const user = data.user[0];
             cb(null, user);
           })
